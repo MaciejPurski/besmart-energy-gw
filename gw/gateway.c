@@ -15,6 +15,7 @@
 #include "config.h"
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/threads.h>
 
 // TODO: fix building and remove this
 #include <sys/msg.h>
@@ -27,6 +28,7 @@ void test() {
     select(0, 0, 0, 0, 0);
 }
 
+char stack[2048];
 static char endpoint[128];
 static char data[200*8];
 static char response[1280];
@@ -35,6 +37,8 @@ static int PHASES;
 static char METER_TYPE_NAME[6];
 static unsigned long long stateSince;
 static unsigned long long lastCap;
+static volatile int active;
+static handle_t mutex;
 
 struct sensorId {
     int client_cid;
@@ -65,12 +69,24 @@ static void modemReset(void)
 	imsg->gpio.port.val = 0 << 18;
 	imsg->gpio.port.mask = 1 << 18;
 
+	fprintf(stderr, "gateway: Modem not responding. Power down USB.\n");
 	msgSend(oid.port, &msg);
-	sleep(1);
+	sleep(5);
 	imsg->gpio.port.val = 1 << 18;
 	msgSend(oid.port, &msg);
+}
 
-	fprintf(stderr, "gateway: Modem not responding. Power down USB.\n");
+void modem_resetThread(void *args)
+{
+    while (1) {
+        sleep(120);
+        mutexLock(mutex);
+        if (active)
+            active = 0;
+        else
+            modemReset();
+        mutexUnlock(mutex);
+    }
 }
 
 
@@ -318,6 +334,8 @@ int main(int argc, char **argv)
         sleep(5);
     }
 
+    beginthread(modem_resetThread, 4, stack, sizeof(stack), NULL);
+
     HTTP_INFO hi;
 
     http_setup(&hi);
@@ -380,7 +398,6 @@ int main(int argc, char **argv)
         res = http_open(&hi);
         if (res != 0) {
             http_close(&hi);
-            modemReset();
             sleep(60);
             continue;
         }
@@ -388,7 +405,6 @@ int main(int argc, char **argv)
         res = sendRequest(&hi);
         if (res < 0) {
             http_close(&hi);
-            modemReset();
             sleep(60);
             continue;
         }
@@ -400,6 +416,12 @@ int main(int argc, char **argv)
         http_close(&hi);
 
         if (DEBUG) printf("\n\nSleeping 1m...\n\n");
+        if (res >= 0) {
+            mutexLock(mutex);
+            active = 1;
+            mutexUnlock(mutex);    
+        }
+
         sleep(60);
     }
     http_destroy(&hi);
